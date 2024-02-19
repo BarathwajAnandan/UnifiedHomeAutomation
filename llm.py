@@ -26,9 +26,11 @@ app = Flask(__name__)
 
 # Shared variable to store user input
 user_input = None
+response_get = None
 w_flag = True
 
 input_received_event = threading.Event()
+response_ready_event = threading.Event()
 
 device_info = {'SamsungTV': 'TV In living room. This is not a light!',
 'Soundbar': 'Soundbar in living room',
@@ -51,15 +53,18 @@ command_info = {"turn_on" : "turn on given device",
 model = 'solar' # TODO: update this for whatever model you wish to use
 
 async def parse_response(response,h):
+    global response_get
 
 # Regular expression pattern to match device:command pairs
     pattern = re.compile(r'(\w+):(\w+)')
 
 # Find all matches in the string
     device_commands = pattern.findall(response)
-    print("parse response:",device_commands)
-    
+    print("Parsed Response : ",device_commands)
+    response_get = device_commands
+    response_ready_event.set()
     # Parse and execute each command
+
     for device_command in device_commands:
 
         device, command = device_command
@@ -72,14 +77,17 @@ async def parse_response(response,h):
         elif command not in command_info.keys():
             print(command, " not in command list. Try again.")
             continue
+
         await h(device,command)
         print(f"{device} has been sent a {command} command!")
 
 
 async def generate(prompt, context,h):
+    global response_get
     print("TYPE OF PROMPT:", type(prompt))
-    r = requests.post('http://192.168.1.77:2223/api/generate',
-                      json={
+    ip = '192.168.1.185'
+    p = '5001'
+    r = requests.post(f'http://{ip}:{p}/api/generate',json={
                           'model': model,
                           'prompt': prompt,
                           'context': context,
@@ -99,37 +107,13 @@ async def generate(prompt, context,h):
             raise Exception(body['error'])
 
         if body.get('done', False):
-
-            await parse_response(res_str,h)
+            if 'justin' not in user_input.lower():
+                response_get = res_str
+                response_ready_event.set()
+            
+            await parse_response(res_str,h) #uncomment this to control devices!!!!!
             return body['context']
-        
-async def generate_no_stream(prompt, context,h):
-    r = requests.post('http://192.168.1.77:2223/api/generate',
-                      json={
-                          'model': model,
-                          'prompt': prompt,
-                          'context': context,
-                      },
-                      stream=False)
-    r.raise_for_status()
-    print(r)
-    res_str = ''
-    for line in r.iter_lines():
-        body = json.loads(line)
-        response_part = body.get('response', '')
-        res_str+=response_part
-    #     # the response streams one token at a time, print that as we receive it
-        
-    #     print(response_part, end='', flush=True)
-    #     await parse_response(response_part,h)
-
-    #     if 'error' in body:
-    #         raise Exception(body['error'])
-
-    #     if body.get('done', False):
-    #         return body['context']
-    print(res_str)
-    
+           
 
 async def main():
     global user_input
@@ -142,7 +126,9 @@ async def main():
     device_info_str = json.dumps(device_info)
     command_info_str = json.dumps(command_info)
 
-    pretext = "Given the following dictionary of devices and commands, reply 'devicename:command' ONLY For example, SamsungTV:turn_on, L1:turn_off, B1:turn_on " # the context stores a conversation history, you can use this to make the model more context aware
+    pretext = "Given the following dictionary of devices and commands, reply 'devicename:command'. \
+               Your reply should consist of two words - 'devicename:command' "
+            # " # the context stores a conversation history, you can use this to make the model more context aware
     context = []
     try:
         while True:
@@ -155,14 +141,18 @@ async def main():
             # user_input = transcribe_audio(audio)
             # user_input = receive_text()
             # user_input = "Turn off bedroom lights"
-            print("GOT INPUT FROM IPHONE:",user_input)
+            # print("GOT INPUT FROM IPHONE:",user_input)
             # instantiate_whisper()
             print()
-            user_input = pretext + device_info_str + command_info_str + "; Answer the question: " + str(user_input)
+            if 'justin' in user_input.lower():
+                user_input = pretext + device_info_str + command_info_str + "; Answer the question: " + str(user_input) 
+
+
             # # print("USER INPUT IS :",user_input)
             context = await generate(user_input, context,h)
             # w_flag = True
             input_received_event.clear()
+            response_ready_event.clear()
             # print()
     except KeyboardInterrupt:
         print("Main thread interrupted and exiting...")
@@ -171,18 +161,24 @@ async def main():
 @app.route('/text', methods=['POST'])
 def receive_text():
     global user_input
+    global response_get
     print("RECEIVE TEXT WORKING")
     text_value = request.get_json()
+    print(text_value)
     if text_value.get('command'):
         user_input = text_value.get('command')
+
         input_received_event.set()
-        return jsonify({"command": user_input}), 200
+        response_ready_event.wait()
+        return jsonify({"reply": response_get})
     else:
         print('No valid posted command')
-        return jsonify({"command": input}), 400
+        return jsonify({"reply": "Your message here"})
+    
+    
 
 def run_flask_app():
-    app.run(host='192.168.1.78', port=5000, debug=False)
+    app.run(host='192.168.1.185', port=5000, debug=False)
 
 
 
